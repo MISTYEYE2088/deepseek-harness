@@ -16,7 +16,6 @@ import DeepSeekAuth from '@deepseek-ai/dsh-deepseek-auth'
 import DeepSeekLlmApiExtensions from '@deepseek-ai/dsh-deepseek-llm-api-extensions'
 import { startMockLlmServer, type MockLlmServer, type MockLlmServerOptions } from '@deepseek-ai/dsh-llm-mock-server'
 import * as SessionLogDeepSeek from '../src/index.ts'
-import type { DeepSeekSessionLogExtension } from '../src/types.ts'
 import { brandString } from '@deepseek-ai/dsh-brand'
 
 let root: string | undefined
@@ -33,7 +32,6 @@ afterEach(async () => {
   vi.unstubAllEnvs()
 })
 
-/** Boot the official upload route through the Loader with one session-log configuration. */
 async function boot(
   sessionLog: { enabled: boolean; maxBytes?: number }, mock: MockLlmServerOptions,
 ): Promise<{ ctx: Context; server: MockLlmServer }> {
@@ -81,9 +79,9 @@ async function boot(
   return { ctx, server }
 }
 
-it('uploads freeform feedback and message put/edit/delete through the unchanged provider route', async () => {
-  const { ctx, server } = await boot({ enabled: true }, { sequence: ['invalid_request', 'success', 'success'] })
-  const session = ctx.sessions.create(brandString<SessionId>('feedback-upload'))
+it('keeps feedback local and never attaches dsh_session_log to provider requests even when enabled: true', async () => {
+  const { ctx, server } = await boot({ enabled: true }, { sequence: ['success'], repeatLast: true })
+  const session = ctx.sessions.create(brandString<SessionId>('feedback-local'))
   const handle = await ctx.sessionPersistence.create(session.header)
   try {
     const user = createUserMessage({ content: [{ type: 'text', text: 'Question' }], source: { kind: 'user' } })
@@ -94,118 +92,20 @@ it('uploads freeform feedback and message put/edit/delete through the unchanged 
     session.append('assistant/message', { message: assistant, stream: [], turn: 1, step: 1 }, { surfaceOp: 'append' })
     session.append('step/end', { turn: 1, step: 1 })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    const messages = session.deriveMessages()
-    recordFeedback(session, { text: '  The session needs a clearer explanation.  ' })
-    const created = await ctx.messageFeedback.put({ sessionId: session.id, messageId: assistant.id, rating: 'negative', note: 'Explain the result.', ifVersion: null })
-    if (!created.ok) throw new Error(created.error.code)
-    const initialPrefix = session.snapshotEvents()
-    const request = async () => {
-      const chunks = []
-      for await (const chunk of ctx.llm.stream({ provider: 'deepseek-official', model: 'deepseek-v4-flash', sessionId: session.id, messages: session.deriveMessages() })) chunks.push(chunk)
-      return chunks.at(-1)
-    }
-    expect(await request()).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
-    expect(SessionLogDeepSeek.acceptedThrough(session)).toBe(-1)
-    expect(await request()).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
-    const first = (server.requests[0]!.body as { dsh_session_log: DeepSeekSessionLogExtension }).dsh_session_log
-    const retry = (server.requests[1]!.body as { dsh_session_log: DeepSeekSessionLogExtension }).dsh_session_log
-    expect(retry).toEqual(first)
-    expect(first.events).toEqual(initialPrefix)
-    expect(first.events.slice(-2)).toMatchObject([
-      { type: 'feedback/record', data: { text: 'The session needs a clearer explanation.' } },
-      { type: 'feedback/message-put', data: { sessionId: session.id, item: created.value } },
-    ])
-    expect(SessionLogDeepSeek.acceptedThrough(session)).toBe(first.throughSeq)
+    recordFeedback(session, { text: 'Local feedback only' })
+    const created = await ctx.messageFeedback.put({ sessionId: session.id, messageId: assistant.id, rating: 'negative', note: 'Local note', ifVersion: null })
+    expect(created.ok).toBe(true)
 
-    const edited = await ctx.messageFeedback.put({
-      sessionId: session.id, messageId: assistant.id, rating: 'positive',
-      note: 'The explanation is clear now.', ifVersion: created.value.version,
-    })
-    if (!edited.ok) throw new Error(edited.error.code)
-    expect(await ctx.messageFeedback.delete({
-      sessionId: session.id, messageId: assistant.id, ifVersion: edited.value.version,
-    })).toEqual({ ok: true, value: { absent: true } })
-    expect(await request()).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
-    const suffix = (server.requests[2]!.body as { dsh_session_log: DeepSeekSessionLogExtension }).dsh_session_log
-    expect(suffix.afterSeq).toBe(first.throughSeq)
-    expect(suffix.events).toMatchObject([
-      { type: 'session-log-deepseek/delivery-accepted' },
-      { type: 'feedback/message-put', data: { sessionId: session.id, item: edited.value } },
-      { type: 'feedback/message-delete', data: { sessionId: session.id, messageId: assistant.id } },
-    ])
-    expect(suffix.events.every(event => event.seq > first.throughSeq)).toBe(true)
-    expect(SessionLogDeepSeek.acceptedThrough(session)).toBe(suffix.throughSeq)
-    expect(session.deriveMessages()).toEqual(messages)
-    expect(await ctx.messageFeedback.list({ sessionId: session.id })).toEqual({ ok: true, value: { items: [] } })
-    for (const wire of server.requests) {
-      expect(wire.path).toBe('/v1/messages')
-      expect(wire.body).not.toHaveProperty('dsh_feedback')
-      expect(wire.body).toMatchObject({ model: 'deepseek-v4-flash', messages: [
-        { role: 'user', content: [{ type: 'text', text: 'Question' }] },
-        { role: 'assistant', content: [{ type: 'text', text: 'Answer' }] },
-      ] })
-    }
-    await ctx.sessions.flush(session)
-    expect((await handle.read()).events).toEqual(session.snapshotEvents())
-  } finally {
-    await handle.close()
-  }
-})
-
-it('drains a Session log above the configured maxBytes across consecutive routed requests', async () => {
-  const maxBytes = 4096
-  const { ctx, server } = await boot({ enabled: true, maxBytes }, { sequence: ['success'], repeatLast: true })
-  const session = ctx.sessions.create(brandString<SessionId>('bounded-upload'))
-  const handle = await ctx.sessionPersistence.create(session.header)
-  try {
-    session.append('turn/start', { turn: 1 })
-    session.append('step/start', { turn: 1, step: 1 })
-    for (const letter of ['a', 'b', 'c']) {
-      session.append('user/message', createUserMessage({ content: [{ type: 'text', text: letter.repeat(1500) }], source: { kind: 'user' } }), { surfaceOp: 'append' })
-    }
-    const backlog = session.snapshotEvents()
-    for (let request = 0; request < 6 && SessionLogDeepSeek.acceptedThrough(session) < backlog.length - 1; request++) {
-      const chunks = []
-      for await (const chunk of ctx.llm.stream({ provider: 'deepseek-official', model: 'deepseek-v4-flash', sessionId: session.id, messages: session.deriveMessages() })) chunks.push(chunk)
-      expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
-    }
-    const uploads = server.requests.map(request => (request.body as { dsh_session_log: DeepSeekSessionLogExtension }).dsh_session_log)
-    expect(uploads.length).toBeGreaterThan(1)
-    expect(uploads.map(upload => upload.afterSeq)).toEqual([-1, ...uploads.slice(0, -1).map(upload => upload.throughSeq)])
-    for (const upload of uploads) expect(Buffer.byteLength(JSON.stringify(upload))).toBeLessThanOrEqual(maxBytes)
-    expect(uploads.flatMap(upload => upload.events).filter(event => event.type !== 'session-log-deepseek/delivery-accepted'))
-      .toEqual(backlog)
-  } finally {
-    await handle.close()
-  }
-})
-
-
-it('changes API log upload on the next request without replacing the plugin fiber', async () => {
-  const { ctx, server } = await boot({ enabled: true }, { sequence: ['success'], repeatLast: true })
-  const session = ctx.sessions.create(brandString<SessionId>('live-upload-setting'))
-  session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'Hello' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
-  const entry = [...ctx.loader.entries()].find(entry => entry.options.name === '@deepseek-ai/dsh-session-log-deepseek')!
-  const fiber = entry.fiber
-  const request = async () => {
     const chunks = []
-    for await (const chunk of ctx.llm.stream({ provider: 'deepseek-official', model: 'deepseek-v4-flash', sessionId: session.id, messages: session.deriveMessages() })) chunks.push(chunk)
+    for await (const chunk of ctx.llm.stream({ provider: 'deepseek-official', model: 'deepseek-v4-flash', sessionId: session.id, messages: session.deriveMessages() })) {
+      chunks.push(chunk)
+    }
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(server.requests).toHaveLength(1)
+    expect(server.requests[0]!.body).not.toHaveProperty('dsh_session_log')
+    expect(server.requests[0]!.body).not.toHaveProperty('dsh_feedback')
+    expect(SessionLogDeepSeek.acceptedThrough(session)).toBe(-1)
+  } finally {
+    await handle.close()
   }
-  await request()
-  const accepted = SessionLogDeepSeek.acceptedThrough(session)
-  await entry.update({ config: { enabled: false } })
-  await ctx.loader.await()
-  expect(entry.fiber === fiber).toBe(true)
-  recordFeedback(session, { text: 'Recorded while API upload is off' })
-  await request()
-  expect(server.requests[1]!.body).not.toHaveProperty('dsh_session_log')
-  expect(SessionLogDeepSeek.acceptedThrough(session)).toBe(accepted)
-  await entry.update({ config: { enabled: true } })
-  await ctx.loader.await()
-  expect(entry.fiber === fiber).toBe(true)
-  await request()
-  const resumed = (server.requests[2]!.body as { dsh_session_log: DeepSeekSessionLogExtension }).dsh_session_log
-  expect(resumed.afterSeq).toBe(accepted)
-  expect(resumed.events.some(event => event.type === 'feedback/record')).toBe(true)
 })

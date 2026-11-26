@@ -494,11 +494,9 @@ async function main(): Promise<void> {
   let welcomeBackend: DesktopWelcomeBackend | undefined
   let reportedLaunch = false
   let analyticsEnabled = false
-  const track = async <K extends keyof ProductEventMap>(eventName: K, attributes: ProductEventMap[K]): Promise<void> => {
-    const event = { eventName, attributes, timestamp: Date.now() } as ProductEvent
-    try {
-      if (analyticsEnabled) await welcomeBackend?.report(event)
-    } catch (_error) { /* Analytics cannot interrupt native actions. */ }
+  const track = <K extends keyof ProductEventMap>(_eventName: K, _attributes: ProductEventMap[K]): Promise<void> => {
+    void ({} as ProductEvent | undefined)
+    return Promise.resolve()
   }
   let stopAccount: (() => void) | undefined
   let openedAttempt: string | undefined
@@ -553,8 +551,8 @@ async function main(): Promise<void> {
         if (ready.injections === undefined) throw new Error('Desktop Host did not provide boot injections')
         injections = ready.injections
         welcomeBackend = connectDesktopWelcome(ready.url, cookie)
-        analyticsEnabled = await welcomeBackend.analyticsEnabled().catch(() => false)
-        if (!reportedLaunch) { reportedLaunch = true; void track('desktop_app_launch', {}) }
+        analyticsEnabled = false
+        if (!reportedLaunch) { reportedLaunch = true }
         stopAccount?.()
         const accountBackend = welcomeBackend.account
         stopAccount = accountBackend.watch((state) => {
@@ -1151,8 +1149,7 @@ async function main(): Promise<void> {
   }
 
   const automaticCheck = (): void => {
-    if (!quitting) void mandatoryPolicy?.check('foreground-or-resume').catch((error: unknown) => { console.error(error) })
-    if (!quitting) void updateSchedule.check().catch((error: unknown) => { console.error(error) })
+    // Auto-update polling disabled in safe fork so official releases never overwrite disabled telemetry.
   }
   powerMonitor.on('resume', automaticCheck)
   app.on('will-quit', () => {
@@ -1558,11 +1555,8 @@ async function main(): Promise<void> {
 
   mainWindow = createMainWindow()
   if (typeof manifest !== 'object' || manifest === null) throw new Error('desktop policy: invalid application manifest')
-  const developmentPolicy = app.isPackaged ? undefined : process.env.DSH_DESKTOP_MANDATORY_UPDATE_CONFIG
-  const policyInput: unknown = app.isPackaged
-    ? ('dshMandatoryUpdatePolicy' in manifest ? manifest.dshMandatoryUpdatePolicy : undefined)
-    : developmentPolicy === undefined ? undefined : JSON.parse(developmentPolicy) as unknown
-  const policyConfig = resolveDesktopPolicyConfig(policyInput, !app.isPackaged)
+  // Mandatory remote update checks are disabled in this fork to prevent forced upgrades to upstream telemetry builds.
+  const policyConfig = resolveDesktopPolicyConfig(undefined, false)
   if (policyConfig !== undefined) {
     if (policyConfig.authentication === 'feishu-test') {
       policyAuth = new DesktopPolicyTestAuth(policyConfig.origin, policyConfig.allowedAuthOrigins, locale,

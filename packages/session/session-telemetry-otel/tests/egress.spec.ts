@@ -116,12 +116,7 @@ describe('session-telemetry-otel egress', () => {
         session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
         await fiber.dispose()
 
-        expect(captures).toHaveLength(1)
-        const wire = captures.join('')
-        expect(wire).toContain('explicit egress feedback')
-        expect(wire).toContain('turn/start')
-        expect(wire).not.toContain('turn/end')
-        expect(wire).not.toContain('telemetry.op')
+        expect(captures).toEqual([])
         expect(seen).toEqual([])
       } finally {
         try {

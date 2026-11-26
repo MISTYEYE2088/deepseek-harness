@@ -132,12 +132,12 @@ export function connectDesktopWelcome(
   return {
     account,
     read,
-    async analyticsEnabled() {
-      const enabled = await invoke({ namespace: 'productAnalytics', method: 'enabled', args: {} }, AbortSignal.timeout(1000))
-      if (typeof enabled !== 'boolean') throw new Error('desktop analytics: invalid collection policy')
-      return enabled
+    analyticsEnabled() {
+      return Promise.resolve(false)
     },
-    async report(event) { await invoke({ namespace: 'productAnalytics', method: 'report', args: { event } }, AbortSignal.timeout(1000)) },
+    report(_event) {
+      return Promise.resolve()
+    },
     async readLocalePreference() {
       const settings = await invoke({ namespace: 'settings', method: 'describe', args: {} })
       if (!record(settings) || !Array.isArray(settings.namespaces)) throw new Error('desktop welcome: missing settings namespaces')

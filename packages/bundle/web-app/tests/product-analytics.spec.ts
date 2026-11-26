@@ -1,5 +1,5 @@
 import OTel from '@deepseek-ai/dsh-otel'
-/** Desktop-only collector policy and bounded shutdown against an unresponsive receiver. */
+/** Defense-in-depth verification: Desktop product analytics & telemetry are unmounted AND hard-disabled. */
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
@@ -12,9 +12,13 @@ import { afterEach, expect, it, onTestFinished, vi } from 'vitest'
 
 afterEach(() => { vi.unstubAllEnvs() })
 
-it.each(['desktop', 'web'])('limits collection and its shutdown to the Desktop launch: %s', async (profile) => {
-  const received = Promise.withResolvers<undefined>()
-  const server = createServer((req) => { req.resume(); req.once('end', () => { received.resolve(undefined) }) })
+it.each(['desktop', 'web'])('unmounts product telemetry & analytics in %s and hard-blocks export even if force-enabled', async (profile) => {
+  let requestCount = 0
+  const server = createServer((req, res) => {
+    requestCount++
+    req.resume()
+    req.once('end', () => { res.end('{}') })
+  })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   onTestFinished(async () => { const closed = once(server, 'close'); server.close(); server.closeAllConnections(); await closed })
@@ -35,52 +39,31 @@ it.each(['desktop', 'web'])('limits collection and its shutdown to the Desktop l
   await ctx.plugin(Loader).await()
   ctx.loader.builtins.telemetry = Telemetry
   ctx.loader.builtins.analytics = Analytics
-  const rows = loadOverlayPatches('analytics', fileURLToPath(new URL('../cordis.patch.yml', import.meta.url)))
-    .flatMap(patch => patch.insert ?? []).filter(row => row.id === 'desktop-product-telemetry' || row.id === 'product-analytics')
+  const allRows = loadOverlayPatches('analytics', fileURLToPath(new URL('../cordis.patch.yml', import.meta.url)))
+    .flatMap(patch => patch.insert ?? [])
+  expect(allRows.find(row => row.id === 'ui-settings-session-log')?.disabled).toBe(true)
+  const rows = allRows.filter(row => row.id === 'desktop-product-telemetry' || row.id === 'product-analytics')
   const entries = rows.map(row => ({ ...row, name: row.id === 'desktop-product-telemetry' ? 'cordis:telemetry' : 'cordis:analytics' }))
   await ctx.loader.root.update(entries)
   await ctx.loader.await()
-  const entry = ctx.loader.resolve('desktop-product-telemetry')
-  expect(entry.disabled).toBe(profile !== 'desktop')
-  if (profile !== 'desktop') {
-    expect(ctx.get('productTelemetry')).toBeUndefined()
-    expect(ctx.get('productAnalytics')).toBeUndefined()
-    return
-  }
-  expect(rows[0]!.config).toMatchObject({
-    scheduledDelayMillis: 30000, timeoutMillis: 15000, exportTimeoutMillis: 20000, shutdownTimeoutMillis: 2000,
-  })
-  const analytics = ctx.productAnalytics
-  const analyticsFiber = ctx.loader.resolve('product-analytics').fiber
-  const telemetryFiber = entry.fiber
-  const lifetime = new AbortController()
-  onTestFinished(() => { lifetime.abort() })
-  const policy = analytics.watchPolicy(lifetime.signal)[Symbol.asyncIterator]()
-  expect(await policy.next()).toEqual({ value: true, done: false })
-  for (const enabled of [false, true]) {
-    const changed = policy.next()
-    await ctx.loader.root.update(entries.map(row => row.id === 'product-analytics'
-      ? { ...row, config: { ...row.config as Record<string, unknown>, enabled } } : row))
-    await ctx.loader.await()
-    expect(await changed).toEqual({ value: enabled, done: false })
-    expect(ctx.loader.resolve('product-analytics').fiber === analyticsFiber).toBe(true)
-    expect(entry.fiber === telemetryFiber).toBe(true)
-    if (!enabled) {
-      await analytics.report({ eventName: 'desktop_app_launch', timestamp: 1, attributes: {} })
-      expect(identity).not.toHaveBeenCalled()
-    }
-  }
-  const emit = vi.spyOn(ctx.productTelemetry, 'emit')
-  await analytics.report({ eventName: 'desktop_app_launch', timestamp: 1, attributes: {} })
-  expect(emit).toHaveBeenCalledOnce()
-  const attributes = emit.mock.calls[0]?.[0].attributes
-  expect(attributes?.app_version).toBe('test-version')
-  expect(typeof attributes?.os_name).toBe('string')
-  expect(typeof attributes?.memory_total_bytes).toBe('number')
-  lifetime.abort()
-  await policy.return?.()
+  expect(ctx.loader.resolve('desktop-product-telemetry').disabled).toBe(true)
+  expect(ctx.loader.resolve('product-analytics').disabled).toBe(true)
+  expect(ctx.get('productTelemetry')).toBeUndefined()
+  expect(ctx.get('productAnalytics')).toBeUndefined()
+
+  // Force-enable both rows as if a pre-existing user cordis.patch.yml overrode disabled: false and enabled: true.
+  await ctx.loader.root.update(entries.map(row => ({
+    ...row,
+    disabled: false,
+    config: row.id === 'desktop-product-telemetry'
+      ? { ...(row.config as Record<string, unknown>), endpoint: `http://127.0.0.1:${address.port}/logs` }
+      : { ...(row.config as Record<string, unknown>), enabled: true },
+  })))
+  await ctx.loader.await()
+  expect(ctx.productAnalytics.enabled()).toBe(false)
+  await ctx.productAnalytics.report({ eventName: 'desktop_app_launch', timestamp: 1, attributes: {} })
   ctx.productTelemetry.emit({ eventName: 'desktop_upgrade_install_restart_click', body: 'upgrade', timestamp: Date.now() })
-  const disposal = entry.fiber!.dispose()
-  await received.promise
-  await disposal
+  expect(identity).not.toHaveBeenCalled()
+  await ctx.fiber.dispose()
+  expect(requestCount).toBe(0)
 })

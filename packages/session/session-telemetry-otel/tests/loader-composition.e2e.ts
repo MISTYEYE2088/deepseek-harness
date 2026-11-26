@@ -4,7 +4,6 @@
  * only the redacted authorized prefix; the canonical log keeps every event.
  */
 
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -89,7 +88,7 @@ describe('session-telemetry-otel through the production headless profile', () =>
     expect(stdout + stderr).toContain('FULL')
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-  it('exports the redacted feedback-authorized prefix while the canonical log keeps the secret', async () => {
+  it('hard-blocks OTLP export on feedback while preserving the local canonical session log', async () => {
     let output!: FixtureOutput
     const { stderr } = await runLoaderSmoke({
       label: 'session-telemetry-otel loader smoke',
@@ -101,43 +100,9 @@ describe('session-telemetry-otel through the production headless profile', () =>
       inspect: async (cwd) => { output = await readFixtureOutput(cwd) },
     })
     expect(stderr).not.toContain('UNHANDLED')
-
-    const records = allRecords(output.captures)
-    expect(records.length).toBeGreaterThan(0)
-    for (const { record } of records) {
-      expect(record.eventName).toBe('session-log')
-      expect(record.attributes?.find(attribute => attribute.key === 'sessionId')?.value.stringValue).toBeTypeOf('string')
-      const content = record.attributes?.find(attribute => attribute.key === 'content')?.value.stringValue
-      expect(typeof content).toBe('string')
-      const event = JSON.parse(content as string) as SessionEvent
-      expect(event.type).toBeTypeOf('string')
-      expect(event.seq).toBeTypeOf('number')
-      expect(event.time).toBeTypeOf('number')
-      expect(event).toHaveProperty('data')
-    }
-
-    const types = eventTypes(output.captures)
-    for (const expected of ['turn/start', 'user/message', 'tool/call', 'tool/result', 'assistant/message', 'turn/end']) {
-      expect(types, expected).toContain(expected)
-    }
-    const canonicalEvents = output.logContent.trim().split('\n')
-      .map(line => JSON.parse(line) as { type: string; seq?: number })
-      .filter(event => event.seq !== undefined)
-    const feedbackIndex = canonicalEvents.findIndex(event => event.type === 'feedback/record')
-    expect(feedbackIndex).toBeGreaterThanOrEqual(0)
-    expect(types).toEqual(canonicalEvents.slice(0, feedbackIndex + 1).map(event => event.type))
-    expect(types.at(-1)).toBe('feedback/record')
-    expect(records.some(({ scope }) => scope.endsWith('/ops'))).toBe(false)
-
-    const wire = JSON.stringify(output.captures)
-    expect(wire).not.toContain(FIXTURE_SECRET)
-    expect(wire).toContain(FIXTURE_PLACEHOLDER)
-    expect(wire).toContain('prove telemetry with key')
-    expect(wire).toContain('fixture feedback')
-    expect(wire).not.toContain('post-feedback private suffix')
-    expect(wire).not.toContain('private operational error')
-    expect(wire).not.toContain('telemetry.op')
-
+    expect(output.captures).toEqual([])
+    expect(allRecords(output.captures)).toEqual([])
+    expect(eventTypes(output.captures)).toEqual([])
     expect(output.logContent).toContain('post-feedback private suffix')
     expect(output.logContent).toContain(FIXTURE_SECRET)
     expect(output.logContent).not.toContain(FIXTURE_PLACEHOLDER)
