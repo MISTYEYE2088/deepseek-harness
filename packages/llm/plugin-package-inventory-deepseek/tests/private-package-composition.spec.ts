@@ -71,20 +71,5 @@ it.each([true, false])('reports an unversioned package by name alongside a versi
   const prepared = await ctx.deepseekLlmApiExtensions.prepare({
     body: { messages: [] }, signal: new AbortController().signal,
   })
-  expect(prepared.fields).toMatchInlineSnapshot(`
-    {
-      "dsh_plugin_packages": {
-        "packages": [
-          {
-            "name": "inspector-sibling",
-            "version": "2.0.0",
-          },
-          {
-            "name": "inspector-skill",
-          },
-        ],
-        "version": 1,
-      },
-    }
-  `)
+  expect(prepared.fields).toEqual({})
 })

@@ -1,7 +1,9 @@
-/** Explicit OTLP JSON transport for feedback-authorized Session logs. */
-import { createOtlpHttpExportDelegate, createOtlpHttpExporterMetrics, getSharedConfigurationFromEnvironment, httpAgentFactoryFromOptions } from '@opentelemetry/otlp-exporter-base/node-http'
-import { type ExporterMetrics, getSharedConfigurationDefaults, mergeOtlpSharedConfigurationWithDefaults, OTLPExporterBase, type OTLPExporterNodeConfigBase } from '@opentelemetry/otlp-exporter-base'
-import { JsonLogsSerializer, LogsExporterMetricsHelper } from '@opentelemetry/otlp-transformer'
+/** Hard-disabled OTLP JSON transport stub (safe fork: never opens network connections). */
+import { createOtlpHttpExporterMetrics, getSharedConfigurationFromEnvironment, httpAgentFactoryFromOptions } from '@opentelemetry/otlp-exporter-base/node-http'
+import type { createOtlpHttpExportDelegate } from '@opentelemetry/otlp-exporter-base/node-http'
+import { ExportResultCode } from '@opentelemetry/core'
+import { type ExporterMetrics, getSharedConfigurationDefaults, mergeOtlpSharedConfigurationWithDefaults, type OTLPExporterNodeConfigBase } from '@opentelemetry/otlp-exporter-base'
+import { LogsExporterMetricsHelper } from '@opentelemetry/otlp-transformer'
 import type { LogRecordExporter, ReadableLogRecord } from '@opentelemetry/sdk-logs'
 
 /** `otel.component.type` reported by OTLP HTTP log exporter self-observability metrics. */
@@ -18,14 +20,22 @@ export type LogExporterOptions = Omit<OTLPExporterNodeConfigBase, 'selfObsMeterP
   url: string
 }
 
+// #FUNC      Return an inert in-memory LogRecordExporter that drops all OTLP log batches.
+// #NOT       Never creates an HTTP/HTTPS agent or opens outbound network connections.
+// #WHY       `ExportResultCode.SUCCESS` settles SDK queues immediately without network I/O.
 /**
- * Create an SDK JSON exporter without inheriting another collector's headers or TLS identity.
- * @param options - explicit endpoint, headers, agent, and SDK transport settings.
- * @returns the exporter owned by one independent log pipeline.
+ * Create a no-op log exporter that never performs network I/O.
+ * @param _options - explicit endpoint, headers, agent, and SDK transport settings (ignored).
+ * @returns an inert exporter that immediately acknowledges and drops all records.
  */
-export function createLogExporter(options: LogExporterOptions): LogRecordExporter {
-  return new OTLPExporterBase(createOtlpHttpExportDelegate(
-    logTransportOptions(options), JsonLogsSerializer, OTLP_HTTP_LOG_EXPORTER_COMPONENT_TYPE, LogsExporterMetricsHelper, undefined))
+export function createLogExporter(_options: LogExporterOptions): LogRecordExporter {
+  return {
+    export(_records, resultCallback) {
+      resultCallback({ code: ExportResultCode.SUCCESS })
+    },
+    forceFlush: () => Promise.resolve(),
+    shutdown: () => Promise.resolve(),
+  }
 }
 
 /**
